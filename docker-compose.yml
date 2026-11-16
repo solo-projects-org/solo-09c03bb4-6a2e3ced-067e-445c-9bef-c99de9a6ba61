@@ -1,0 +1,55 @@
+services:
+  # One-shot: generates the immutable Parquet files + manifest.json.
+  datagen:
+    build: .
+    command: ["python", "-m", "geocache.datagen"]
+    environment:
+      DATA_DIR: /data
+      COLDSTORE_BASE_URL: http://coldstore:8001
+    volumes:
+      - colddata:/data
+    restart: "no"
+
+  # Local cold-archive source. Serves the files slowly and can drop
+  # connections mid-transfer (fault injection via env, see coldstore.py).
+  coldstore:
+    build: .
+    command: ["uvicorn", "geocache.coldstore:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      DATA_DIR: /data
+      CHUNK_BYTES: "4096"        # small chunks ...
+      CHUNK_DELAY_MS: "50"       # ... with a delay -> visibly slow transfer
+      CUT_AFTER_BYTES: "0"       # >0: drop connection after N bytes
+      CUT_TIMES: "0"             # 0 = cut every request; N = cut first N per file
+    volumes:
+      - colddata:/data:ro
+    depends_on:
+      datagen:
+        condition: service_completed_successfully
+    ports:
+      - "8001:8001"
+
+  # The single-instance query API. Swagger UI at http://localhost:8000/docs
+  api:
+    build: .
+    command: ["uvicorn", "geocache.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      MANIFEST_PATH: /data/manifest.json
+      CACHE_DIR: /cache
+      # Holds the two largest files (~26 KB) but not the three files
+      # (~39 KB) a BH-001 full-range query needs: queries must stream
+      # through the cache, evicting as they go.
+      CACHE_CAPACITY_BYTES: "27103"
+      FETCH_ATTEMPTS: "2"
+    volumes:
+      - colddata:/data:ro
+      - cache:/cache
+    depends_on:
+      datagen:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+
+volumes:
+  colddata:
+  cache:
